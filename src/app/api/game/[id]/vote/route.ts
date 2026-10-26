@@ -1,3 +1,5 @@
+export const maxDuration = 30;
+
 import { auth } from "@/auth";
 import { postVote } from "@/lib/game/server";
 

@@ -1,5 +1,13 @@
 import { ObjectId, type UpdateFilter } from "mongodb";
+import { after } from "next/server";
 import { getDb } from "@/lib/mongodb";
+import {
+  aiAvailable,
+  generateChatLine,
+  generateVoteTarget,
+  randomPersona,
+  type AiContext,
+} from "./ai";
 import {
   CHAT_SECONDS,
   FAST_CHAT_SECONDS,
@@ -38,6 +46,9 @@ interface GameDoc {
   nextAiAt: Date;
   chatSeconds: number;
   votes: VoteMap;
+  aiPersona: string;
+  aiLockUntil: Date | null; // AI 모델 호출 중복 방지용 잠금
+  aiVote: { round: number; targetId: string } | null;
   messages: { speakerId: string | null; text: string }[];
   result: { outcome: RoundOutcome; counts: VoteCounts } | null;
   winner: Winner | null;
@@ -82,6 +93,9 @@ function buildGame(userIds: string[], fast: boolean): GameDoc {
     nextAiAt: new Date(now + 3000),
     chatSeconds,
     votes: {},
+    aiPersona: randomPersona(),
+    aiLockUntil: null,
+    aiVote: null,
     messages: [{ speakerId: null, text: "1라운드 시작! 대화 속에 숨은 AI를 찾아보세요." }],
     result: null,
     winner: null,
@@ -179,28 +193,25 @@ function nextUpdate(game: GameDoc, now: Date): UpdateFilter<GameDoc> | null {
         $push: { messages: { speakerId: null, text: "투표 시간입니다. 누가 AI일까요?" } },
       };
     }
-    if (!ai.eliminated && t >= game.nextAiAt.getTime()) {
-      const used = new Set(
-        game.messages.filter((m) => m.speakerId === ai.id).map((m) => m.text),
-      );
-      return {
-        $push: { messages: { speakerId: ai.id, text: pickAiLine(used) } },
-        $set: { nextAiAt: new Date(t + 2000 + Math.random() * 4000) },
-      };
-    }
-    return null;
+    return null; // AI의 발언은 maybeStartAi가 모델을 호출해서 처리한다
   }
 
   if (game.phase === "vote") {
     const aliveHumans = aliveOf(game.participants).filter((p) => !p.isAI);
     const allVoted = aliveHumans.every((p) => p.id in game.votes);
-    if (t < game.phaseEndsAt.getTime() && !allVoted) return null;
+    const aiVoted = ai.eliminated || game.aiVote?.round === game.round;
+    if (t < game.phaseEndsAt.getTime() && !(allVoted && aiVoted)) return null;
 
     const alive = aliveOf(game.participants);
     const votes: VoteMap = { ...game.votes };
     if (!ai.eliminated) {
       const candidates = alive.filter((p) => p.id !== ai.id);
-      votes[ai.id] = candidates[Math.floor(Math.random() * candidates.length)].id;
+      const decided =
+        game.aiVote?.round === game.round
+          ? candidates.find((p) => p.id === game.aiVote!.targetId)
+          : undefined;
+      // 모델이 제때 정하지 못했으면 무작위
+      votes[ai.id] = (decided ?? candidates[Math.floor(Math.random() * candidates.length)]).id;
     }
     const counts = tally(votes, game.participants);
     const outcome = resolveRound(counts, game.participants);
@@ -244,13 +255,96 @@ function nextUpdate(game: GameDoc, now: Date): UpdateFilter<GameDoc> | null {
   return null;
 }
 
+function aiContext(game: GameDoc, ai: GameParticipant): AiContext {
+  const nameOf = (id: string | null) => game.participants.find((p) => p.id === id)?.name ?? "";
+  const transcript = game.messages
+    .slice(-30)
+    .map((m) => (m.speakerId === null ? `(안내) ${m.text}` : `${nameOf(m.speakerId)}: ${m.text}`))
+    .join("\n");
+  return {
+    aiName: ai.name,
+    persona: game.aiPersona,
+    humanCount: game.participants.filter((p) => !p.isAI).length,
+    transcript,
+  };
+}
+
+// AI가 말하거나 투표할 차례면 응답이 끝난 뒤(after) 모델을 호출한다.
+// 잠금을 먼저 잡아 폴링이 겹쳐도 한 번만 호출한다. 실패하면 스크립트 대사/무작위 투표로 대체한다.
+async function maybeStartAi(game: GameDoc) {
+  const ai = game.participants.find((p) => p.isAI)!;
+  if (ai.eliminated || game.winner) return;
+  const now = new Date();
+  const kind =
+    game.phase === "chat" && now >= game.nextAiAt
+      ? "chat"
+      : game.phase === "vote" && game.aiVote?.round !== game.round
+        ? "vote"
+        : null;
+  if (!kind) return;
+
+  const { games } = await collections();
+  const claimed = await games.updateOne(
+    { _id: game._id, $or: [{ aiLockUntil: null }, { aiLockUntil: { $lte: now } }] },
+    { $set: { aiLockUntil: new Date(now.getTime() + 20_000) } },
+  );
+  if (claimed.matchedCount === 0) return;
+
+  after(async () => {
+    try {
+      const ctx = aiContext(game, ai);
+      if (kind === "chat") {
+        let text: string | null;
+        try {
+          if (!aiAvailable()) throw new Error("ANTHROPIC_API_KEY is not set");
+          text = await generateChatLine(ctx);
+        } catch (error) {
+          console.error("[ai] chat fallback:", error);
+          text = pickAiLine(
+            new Set(game.messages.filter((m) => m.speakerId === ai.id).map((m) => m.text)),
+          );
+        }
+        if (text) {
+          await games.updateOne(
+            { _id: game._id, phase: "chat", round: game.round },
+            { $push: { messages: { speakerId: ai.id, text } } },
+          );
+        }
+        const delay = text ? 3000 + Math.random() * 5000 : 4000;
+        await games.updateOne({ _id: game._id }, { $set: { nextAiAt: new Date(Date.now() + delay) } });
+      } else {
+        const candidates = aliveOf(game.participants).filter((p) => p.id !== ai.id);
+        let target = candidates[Math.floor(Math.random() * candidates.length)];
+        try {
+          if (!aiAvailable()) throw new Error("ANTHROPIC_API_KEY is not set");
+          const name = await generateVoteTarget(ctx, candidates.map((p) => p.name));
+          target = candidates.find((p) => p.name === name) ?? target;
+        } catch (error) {
+          console.error("[ai] vote fallback:", error);
+        }
+        await games.updateOne(
+          { _id: game._id, phase: "vote", round: game.round },
+          { $set: { aiVote: { round: game.round, targetId: target.id } } },
+        );
+      }
+    } catch (error) {
+      console.error("[ai] failed:", error);
+    } finally {
+      await games.updateOne({ _id: game._id }, { $set: { aiLockUntil: null } });
+    }
+  });
+}
+
 async function advance(gameId: ObjectId): Promise<GameDoc | null> {
   const { games } = await collections();
   for (let i = 0; i < 8; i++) {
     const game = await games.findOne({ _id: gameId });
     if (!game) return null;
     const update = nextUpdate(game, new Date());
-    if (!update) return game;
+    if (!update) {
+      await maybeStartAi(game);
+      return game;
+    }
     // 다른 요청이 먼저 전이했으면 version이 달라 적용되지 않고 다시 읽는다
     await games.updateOne(
       { _id: gameId, version: game.version },

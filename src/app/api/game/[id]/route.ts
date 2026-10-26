@@ -1,3 +1,5 @@
+export const maxDuration = 30;
+
 import { auth } from "@/auth";
 import { getGameView } from "@/lib/game/server";
 
