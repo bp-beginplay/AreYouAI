@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import { auth } from "@/auth";
@@ -12,6 +13,12 @@ async function Welcome() {
       <p className="text-zinc-600 dark:text-zinc-400">
         {session.user.name}님, 환영합니다.
       </p>
+      <Link
+        href="/game"
+        className="flex h-12 w-full max-w-xs items-center justify-center rounded-full bg-foreground font-medium text-background transition-opacity hover:opacity-90"
+      >
+        게임 시작
+      </Link>
       <SignOutButton />
     </>
   );
