@@ -1,4 +1,4 @@
-export const PLAYER_COUNT = 5;
+export const PLAYER_COUNT = 3;
 export const CHAT_SECONDS = 300;
 export const FAST_CHAT_SECONDS = 30;
 export const VOTE_SECONDS = 10;
@@ -66,15 +66,13 @@ export function shuffle<T>(items: T[]): T[] {
   return result;
 }
 
-// 나 1명 + 사람 역할 봇 3명 + AI 1명, 이름은 모두 랜덤
+// 나 1명 + AI 1명 + 나머지는 사람 역할 봇, 이름은 모두 랜덤
 export function createParticipants(): Participant[] {
   const names = shuffle(NAME_POOL).slice(0, PLAYER_COUNT);
   const roles = shuffle([
     { isYou: true, isAI: false },
-    { isYou: false, isAI: false },
-    { isYou: false, isAI: false },
-    { isYou: false, isAI: false },
     { isYou: false, isAI: true },
+    ...Array.from({ length: PLAYER_COUNT - 2 }, () => ({ isYou: false, isAI: false })),
   ]);
   return roles.map((role, i) => ({
     id: `p${i}`,

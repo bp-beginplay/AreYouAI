@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CHAT_SECONDS,
   FAST_CHAT_SECONDS,
+  PLAYER_COUNT,
   VOTE_SECONDS,
   aliveOf,
   botVotes,
@@ -175,14 +176,14 @@ export default function GameRoom() {
       <main className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center gap-6 px-6 py-10">
         <h1 className="text-3xl font-semibold tracking-tight">Are You AI?</h1>
         <ul className="list-disc space-y-2 pl-5 text-zinc-600 dark:text-zinc-400">
-          <li>5명 중 1명은 AI입니다. 모두 랜덤한 이름을 받습니다.</li>
+          <li>{PLAYER_COUNT}명 중 1명은 AI입니다. 모두 랜덤한 이름을 받습니다.</li>
           <li>{formatTime(CHAT_SECONDS)}간 대화한 뒤 {VOTE_SECONDS}초 동안 비밀투표합니다.</li>
           <li>최다 득표자가 사람이면 탈락, AI면 플레이어의 승리입니다.</li>
           <li>동률이면 투표가 무효가 되고 다시 대화합니다.</li>
           <li>최종 2인에 AI가 남으면 AI의 승리입니다.</li>
         </ul>
         <p className="rounded-lg bg-zinc-100 p-3 text-sm text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
-          프로토타입: 나를 제외한 4명은 미리 정해둔 대사를 말하는 봇입니다.
+          프로토타입: 나를 제외한 {PLAYER_COUNT - 1}명은 미리 정해둔 대사를 말하는 봇입니다.
         </p>
         <label className="flex items-center gap-2 text-sm">
           <input
