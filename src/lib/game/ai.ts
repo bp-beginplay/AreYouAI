@@ -1,21 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { shuffle } from "./engine";
 
 // 게임 중 짧은 채팅을 자주 호출하므로 환경 변수로 더 가벼운 모델로 바꿀 수 있다
 const MODEL = process.env.AI_MODEL ?? "claude-opus-5-5";
 
-const PERSONAS = [
-  "20대 초반 대학생. 장난기 많고 ㅋㅋ를 자주 쓴다. 말투가 가볍고 질문을 잘 던진다.",
-  "30대 직장인. 피곤한 티가 나고 말수가 적은 편이다. 가끔 퇴근하고 싶다는 말을 한다.",
-  "10대 후반. 줄임말과 유행어를 많이 쓰고 문장이 짧다.",
-  "40대 자영업자. 느긋하고 아재 개그를 가끔 한다. 맞춤법을 자주 틀린다.",
-  "조용하고 신중한 성격. 상대 말을 되묻는 걸 좋아하고 추리하는 걸 즐긴다.",
-  "게임을 많이 해본 사람. 분석적으로 말하고 다른 사람의 말투를 지적하는 편이다.",
-];
-
-export function randomPersona(): string {
-  return shuffle(PERSONAS)[0];
-}
+export const AI_PERSONA = "사람들과 대화하면서 자신이 AI임을 숨기는 AI";
 
 export function aiAvailable(): boolean {
   return !!process.env.ANTHROPIC_API_KEY;

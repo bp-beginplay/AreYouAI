@@ -5,13 +5,12 @@ import {
   aiAvailable,
   generateChatLine,
   generateVoteTarget,
-  randomPersona,
+  AI_PERSONA,
   type AiContext,
 } from "./ai";
 import {
   CHAT_SECONDS,
   FAST_CHAT_SECONDS,
-  PLAYER_COUNT,
   VOTE_SECONDS,
   aliveOf,
   checkWinner,
@@ -46,6 +45,7 @@ interface GameDoc {
   nextAiAt: Date;
   chatSeconds: number;
   votes: VoteMap;
+  solo: boolean; // 테스트용 1대1 대화: AI는 투표하지 않고 사람의 투표만 집계한다
   aiPersona: string;
   aiLockUntil: Date | null; // AI 모델 호출 중복 방지용 잠금
   aiVote: { round: number; targetId: string } | null;
@@ -73,8 +73,8 @@ async function collections() {
 
 // ---------- 매칭 ----------
 
-function buildGame(userIds: string[], fast: boolean): GameDoc {
-  const names = randomNames(PLAYER_COUNT);
+function buildGame(userIds: string[], fast: boolean, solo = false): GameDoc {
+  const names = randomNames(userIds.length + 1);
   const slots = shuffle<string | null>([...userIds, null]);
   const now = Date.now();
   const chatSeconds = fast ? FAST_CHAT_SECONDS : CHAT_SECONDS;
@@ -93,10 +93,18 @@ function buildGame(userIds: string[], fast: boolean): GameDoc {
     nextAiAt: new Date(now + 3000),
     chatSeconds,
     votes: {},
-    aiPersona: randomPersona(),
+    solo,
+    aiPersona: AI_PERSONA,
     aiLockUntil: null,
     aiVote: null,
-    messages: [{ speakerId: null, text: "1라운드 시작! 대화 속에 숨은 AI를 찾아보세요." }],
+    messages: [
+      {
+        speakerId: null,
+        text: solo
+          ? "테스트 1대1 대화입니다. AI와 자유롭게 대화해 보세요."
+          : "1라운드 시작! 대화 속에 숨은 AI를 찾아보세요.",
+      },
+    ],
     result: null,
     winner: null,
     version: 0,
@@ -175,6 +183,19 @@ export async function queueStatus(userId: string) {
   return { queued: false, gameId };
 }
 
+// 테스트용: 대기 없이 AI와 1대1 게임을 바로 만든다. 대기열 문서에 연결해 새로고침해도 복귀한다
+export async function startSoloGame(userId: string, fast: boolean) {
+  const { games, queue } = await collections();
+  const game = buildGame([userId], fast, true);
+  await games.insertOne(game);
+  await queue.updateOne(
+    { _id: userId },
+    { $set: { seenAt: new Date(), fast, gameId: game._id } },
+    { upsert: true },
+  );
+  return { queued: false, gameId: game._id.toString() };
+}
+
 export async function cancelQueue(userId: string) {
   const { queue } = await collections();
   await queue.deleteOne({ _id: userId, gameId: null });
@@ -199,12 +220,12 @@ function nextUpdate(game: GameDoc, now: Date): UpdateFilter<GameDoc> | null {
   if (game.phase === "vote") {
     const aliveHumans = aliveOf(game.participants).filter((p) => !p.isAI);
     const allVoted = aliveHumans.every((p) => p.id in game.votes);
-    const aiVoted = ai.eliminated || game.aiVote?.round === game.round;
+    const aiVoted = ai.eliminated || game.solo || game.aiVote?.round === game.round;
     if (t < game.phaseEndsAt.getTime() && !(allVoted && aiVoted)) return null;
 
     const alive = aliveOf(game.participants);
     const votes: VoteMap = { ...game.votes };
-    if (!ai.eliminated) {
+    if (!ai.eliminated && !game.solo) {
       const candidates = alive.filter((p) => p.id !== ai.id);
       const decided =
         game.aiVote?.round === game.round
@@ -278,7 +299,7 @@ async function maybeStartAi(game: GameDoc) {
   const kind =
     game.phase === "chat" && now >= game.nextAiAt
       ? "chat"
-      : game.phase === "vote" && game.aiVote?.round !== game.round
+      : game.phase === "vote" && !game.solo && game.aiVote?.round !== game.round
         ? "vote"
         : null;
   if (!kind) return;

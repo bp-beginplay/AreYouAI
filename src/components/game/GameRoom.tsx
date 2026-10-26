@@ -125,6 +125,15 @@ export default function GameRoom() {
     if (status?.gameId) enterGame(status.gameId);
   }
 
+  // 테스트용: 대기 없이 AI와 1대1로 대화한다
+  async function startSolo() {
+    const status = await api<QueueStatus>("/api/game/queue", {
+      method: "POST",
+      body: { solo: true, fast },
+    });
+    if (status?.gameId) enterGame(status.gameId);
+  }
+
   async function cancelMatching() {
     await api("/api/game/queue", { method: "DELETE" });
     setStage("lobby");
@@ -167,13 +176,19 @@ export default function GameRoom() {
         </ul>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={fast} onChange={(e) => setFast(e.target.checked)} />
-          빠른 테스트 (대화 {FAST_CHAT_SECONDS}초, 매칭된 두 명 모두 체크해야 적용)
+          빠른 테스트 (대화 {FAST_CHAT_SECONDS}초, 매칭된 두 명 모두 체크해야 적용, 1대1 대화는 단독 적용)
         </label>
         <button
           onClick={startMatching}
           className="h-12 rounded-full bg-foreground font-medium text-background transition-opacity hover:opacity-90"
         >
           게임 시작
+        </button>
+        <button
+          onClick={startSolo}
+          className="h-12 rounded-full border border-black/10 font-medium dark:border-white/20"
+        >
+          AI와 1대1 대화 (테스트)
         </button>
         <Link href="/" className="text-center text-sm text-zinc-500 underline">
           홈으로

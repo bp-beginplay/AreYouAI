@@ -1,5 +1,5 @@
 import { auth } from "@/auth";
-import { cancelQueue, enqueue, queueStatus } from "@/lib/game/server";
+import { cancelQueue, enqueue, queueStatus, startSoloGame } from "@/lib/game/server";
 
 async function currentUserId() {
   const session = await auth();
@@ -18,7 +18,9 @@ export async function POST(request: Request) {
   const userId = await currentUserId();
   if (!userId) return unauthorized();
   const body = await request.json().catch(() => ({}));
-  return Response.json(await enqueue(userId, body?.fast === true));
+  const fast = body?.fast === true;
+  if (body?.solo === true) return Response.json(await startSoloGame(userId, fast));
+  return Response.json(await enqueue(userId, fast));
 }
 
 export async function DELETE() {
