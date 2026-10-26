@@ -1,4 +1,5 @@
-export const PLAYER_COUNT = 3;
+export const HUMANS_PER_GAME = 2;
+export const PLAYER_COUNT = HUMANS_PER_GAME + 1; // 사람 + AI 1명
 export const CHAT_SECONDS = 300;
 export const FAST_CHAT_SECONDS = 30;
 export const VOTE_SECONDS = 10;
@@ -6,7 +7,6 @@ export const VOTE_SECONDS = 10;
 export interface Participant {
   id: string;
   name: string;
-  isYou: boolean;
   isAI: boolean;
   eliminated: boolean;
 }
@@ -25,21 +25,6 @@ export type Winner = "ai" | "players";
 const NAME_POOL = [
   "하늘", "바다", "민트", "루나", "도토리", "보리", "구름", "나무",
   "별이", "호두", "모래", "솜이", "라떼", "여름", "새벽", "단풍",
-];
-
-const HUMAN_LINES = [
-  "안녕하세요~ 다들 처음이세요?",
-  "오늘 날씨 진짜 좋네요",
-  "ㅋㅋㅋ 이거 누가 AI인지 감도 안 잡히네",
-  "저는 점심 먹고 바로 들어왔어요",
-  "다들 주말에 뭐 하셨어요?",
-  "아 긴장되네요 ㅎㅎ",
-  "방금 말투 좀 수상한데...",
-  "저 아닙니다 진짜로",
-  "커피 한 잔 하면서 하는 중이에요",
-  "ㅋㅋ 질문 하나씩 해볼까요?",
-  "좋아하는 음식이 뭐예요?",
-  "으아 5분 너무 짧다",
 ];
 
 const AI_LINES = [
@@ -66,36 +51,12 @@ export function shuffle<T>(items: T[]): T[] {
   return result;
 }
 
-// 나 1명 + AI 1명 + 나머지는 사람 역할 봇, 이름은 모두 랜덤
-export function createParticipants(): Participant[] {
-  const names = shuffle(NAME_POOL).slice(0, PLAYER_COUNT);
-  const roles = shuffle([
-    { isYou: true, isAI: false },
-    { isYou: false, isAI: true },
-    ...Array.from({ length: PLAYER_COUNT - 2 }, () => ({ isYou: false, isAI: false })),
-  ]);
-  return roles.map((role, i) => ({
-    id: `p${i}`,
-    name: names[i],
-    eliminated: false,
-    ...role,
-  }));
+export function randomNames(count: number): string[] {
+  return shuffle(NAME_POOL).slice(0, count);
 }
 
 export function aliveOf(participants: Participant[]): Participant[] {
   return participants.filter((p) => !p.eliminated);
-}
-
-// 내가 아닌 생존자는 자기 자신을 제외한 생존자 중 한 명에게 투표한다
-export function botVotes(participants: Participant[]): VoteMap {
-  const alive = aliveOf(participants);
-  const votes: VoteMap = {};
-  for (const voter of alive) {
-    if (voter.isYou) continue;
-    const candidates = alive.filter((p) => p.id !== voter.id);
-    votes[voter.id] = candidates[Math.floor(Math.random() * candidates.length)].id;
-  }
-  return votes;
 }
 
 export function tally(votes: VoteMap, participants: Participant[]): VoteCounts {
@@ -131,15 +92,9 @@ export function checkWinner(participants: Participant[]): Winner | null {
   return null;
 }
 
-// used: 이미 쓴 대사 (소진되면 초기화)
-export function pickLine(isAI: boolean, used: Set<string>): string {
-  const pool = isAI ? AI_LINES : HUMAN_LINES;
-  let candidates = pool.filter((line) => !used.has(line));
-  if (candidates.length === 0) {
-    used.clear();
-    candidates = pool;
-  }
-  const line = candidates[Math.floor(Math.random() * candidates.length)];
-  used.add(line);
-  return line;
+// AI의 대사 (프로토타입: 미리 정해둔 문장). used에 있는 대사는 피하고, 모두 썼으면 다시 쓴다
+export function pickAiLine(used: Set<string>): string {
+  const fresh = AI_LINES.filter((line) => !used.has(line));
+  const candidates = fresh.length > 0 ? fresh : AI_LINES;
+  return candidates[Math.floor(Math.random() * candidates.length)];
 }

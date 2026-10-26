@@ -5,33 +5,32 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CHAT_SECONDS,
   FAST_CHAT_SECONDS,
+  HUMANS_PER_GAME,
   PLAYER_COUNT,
   VOTE_SECONDS,
-  aliveOf,
-  botVotes,
-  checkWinner,
-  createParticipants,
-  eliminate,
-  pickLine,
-  resolveRound,
-  tally,
-  type Participant,
-  type RoundOutcome,
-  type VoteCounts,
-  type Winner,
 } from "@/lib/game/engine";
+import type { GameView } from "@/lib/game/server";
 
-type Phase = "lobby" | "chat" | "vote" | "result" | "over";
+type Stage = "boot" | "lobby" | "queue" | "game";
 
-interface Message {
-  id: number;
-  speakerId: string | null; // null = 시스템 메시지
-  text: string;
+interface QueueStatus {
+  queued: boolean;
+  gameId: string | null;
 }
 
-interface RoundResult {
-  outcome: RoundOutcome;
-  counts: VoteCounts;
+type Message = GameView["messages"][number];
+
+async function api<T>(url: string, init?: { method: string; body?: unknown }): Promise<T | null> {
+  try {
+    const res = await fetch(url, {
+      method: init?.method,
+      headers: init?.body ? { "Content-Type": "application/json" } : undefined,
+      body: init?.body ? JSON.stringify(init.body) : undefined,
+    });
+    return res.ok ? ((await res.json()) as T) : null;
+  } catch {
+    return null;
+  }
 }
 
 function formatTime(seconds: number) {
@@ -41,160 +40,137 @@ function formatTime(seconds: number) {
 }
 
 export default function GameRoom() {
-  const [phase, setPhase] = useState<Phase>("lobby");
+  const [stage, setStage] = useState<Stage>("boot");
   const [fast, setFast] = useState(false);
-  const [participants, setParticipants] = useState<Participant[]>([]);
-  const [round, setRound] = useState(1);
-  const [secondsLeft, setSecondsLeft] = useState(0);
+  const [gameId, setGameId] = useState<string | null>(null);
+  const [view, setView] = useState<GameView | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
-  const [myVote, setMyVote] = useState<string | null>(null);
-  const [result, setResult] = useState<RoundResult | null>(null);
-  const [winner, setWinner] = useState<Winner | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
 
-  const nextMessageId = useRef(0);
-  const usedLines = useRef(new Map<string, Set<string>>());
-  const tickRef = useRef<() => void>(() => {});
+  const cursor = useRef(0); // 지금까지 받은 메시지 수
+  const endsAt = useRef(0);
+  const clockSkew = useRef(0); // 서버 시간 - 내 시간
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  const chatSeconds = fast ? FAST_CHAT_SECONDS : CHAT_SECONDS;
-  const you = participants.find((p) => p.isYou);
-  const youAlive = !!you && !you.eliminated;
-  const nameOf = (id: string | null) =>
-    participants.find((p) => p.id === id)?.name ?? "";
-
-  const addMessage = useCallback((speakerId: string | null, text: string) => {
-    nextMessageId.current += 1;
-    const id = nextMessageId.current;
-    setMessages((prev) => [...prev, { id, speakerId, text }]);
+  const enterGame = useCallback((id: string) => {
+    cursor.current = 0;
+    setMessages([]);
+    setView(null);
+    setGameId(id);
+    setStage("game");
   }, []);
 
-  function startGame() {
-    usedLines.current = new Map();
-    setParticipants(createParticipants());
-    setRound(1);
-    setMessages([]);
-    setMyVote(null);
-    setResult(null);
-    setWinner(null);
-    addMessage(null, "1라운드 시작! 대화 속에 숨은 AI를 찾아보세요.");
-    setPhase("chat");
-    setSecondsLeft(chatSeconds);
-  }
-
-  function sendMessage(e: React.FormEvent) {
-    e.preventDefault();
-    const text = draft.trim();
-    if (!text || !you || !youAlive) return;
-    addMessage(you.id, text);
-    setDraft("");
-  }
-
-  function finishVote() {
-    const votes = { ...botVotes(participants) };
-    if (you && youAlive) votes[you.id] = myVote;
-
-    const counts = tally(votes, participants);
-    const outcome = resolveRound(counts, participants);
-
-    let next = participants;
-    if (outcome.kind !== "tie") next = eliminate(participants, outcome.targetId);
-
-    if (outcome.kind === "tie") {
-      addMessage(null, "동률! 투표가 무효 처리되었습니다.");
-    } else {
-      addMessage(null, `${nameOf(outcome.targetId)}님이 최다 득표로 지목되었습니다.`);
-    }
-
-    setParticipants(next);
-    setResult({ outcome, counts });
-    setWinner(outcome.kind === "ai-caught" ? "players" : checkWinner(next));
-    setPhase("result");
-  }
-
-  function advance() {
-    if (phase === "chat") {
-      setPhase("vote");
-      setSecondsLeft(VOTE_SECONDS);
-      setMyVote(null);
-    } else if (phase === "vote") {
-      finishVote();
-    }
-  }
-
-  function continueGame() {
-    if (winner) {
-      setPhase("over");
-      return;
-    }
-    setRound(round + 1);
-    addMessage(null, `${round + 1}라운드 대화를 시작합니다.`);
-    setPhase("chat");
-    setSecondsLeft(chatSeconds);
-  }
-
-  // 매 렌더마다 최신 상태를 보는 틱 핸들러를 갱신
+  // 새로고침해도 대기 중이거나 진행 중인 게임으로 돌아온다
   useEffect(() => {
-    tickRef.current = () => {
-      if (secondsLeft > 1) setSecondsLeft(secondsLeft - 1);
-      else advance();
+    let cancelled = false;
+    api<QueueStatus>("/api/game/queue").then((status) => {
+      if (cancelled) return;
+      if (status?.gameId) enterGame(status.gameId);
+      else setStage(status?.queued ? "queue" : "lobby");
+    });
+    return () => {
+      cancelled = true;
     };
-  });
+  }, [enterGame]);
+
+  // 대기열: 폴링하면서 상대가 잡히면 게임에 입장
+  useEffect(() => {
+    if (stage !== "queue") return;
+    const timer = setInterval(async () => {
+      const status = await api<QueueStatus>("/api/game/queue");
+      if (status?.gameId) enterGame(status.gameId);
+      else if (status && !status.queued) setStage("lobby");
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [stage, enterGame]);
+
+  const poll = useCallback(async () => {
+    if (!gameId) return;
+    const next = await api<GameView>(`/api/game/${gameId}?after=${cursor.current}`);
+    if (!next) return;
+    clockSkew.current = Date.parse(next.serverNow) - Date.now();
+    endsAt.current = Date.parse(next.phaseEndsAt);
+    cursor.current = Math.max(cursor.current, next.total);
+    if (next.messages.length > 0) {
+      setMessages((prev) => [...prev, ...next.messages.filter((m) => m.id >= prev.length)]);
+    }
+    setView(next);
+  }, [gameId]);
 
   useEffect(() => {
-    if (phase !== "chat" && phase !== "vote") return;
-    const id = setInterval(() => tickRef.current(), 1000);
-    return () => clearInterval(id);
-  }, [phase]);
-
-  // 생존한 봇이 2~6초 간격으로 대사를 친다 (프로토타입용 스크립트)
-  useEffect(() => {
-    if (phase !== "chat") return;
-    const speakers = participants.filter((p) => !p.isYou && !p.eliminated);
-    if (speakers.length === 0) return;
-
-    let timer: ReturnType<typeof setTimeout>;
-    const schedule = () => {
-      timer = setTimeout(() => {
-        const speaker = speakers[Math.floor(Math.random() * speakers.length)];
-        const used = usedLines.current.get(speaker.id) ?? new Set<string>();
-        usedLines.current.set(speaker.id, used);
-        addMessage(speaker.id, pickLine(speaker.isAI, used));
-        schedule();
-      }, 2000 + Math.random() * 4000);
+    if (stage !== "game") return;
+    poll();
+    const pollTimer = setInterval(poll, 1000);
+    const clockTimer = setInterval(() => {
+      const left = Math.ceil((endsAt.current - (Date.now() + clockSkew.current)) / 1000);
+      setSecondsLeft(Math.max(0, left));
+    }, 250);
+    return () => {
+      clearInterval(pollTimer);
+      clearInterval(clockTimer);
     };
-    schedule();
-    return () => clearTimeout(timer);
-  }, [phase, participants, addMessage]);
+  }, [stage, poll]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
-  if (phase === "lobby") {
+  async function startMatching() {
+    setStage("queue");
+    const status = await api<QueueStatus>("/api/game/queue", {
+      method: "POST",
+      body: { fast },
+    });
+    if (status?.gameId) enterGame(status.gameId);
+  }
+
+  async function cancelMatching() {
+    await api("/api/game/queue", { method: "DELETE" });
+    setStage("lobby");
+  }
+
+  async function sendMessage(e: React.FormEvent) {
+    e.preventDefault();
+    const text = draft.trim();
+    if (!text || !gameId) return;
+    setDraft("");
+    await api(`/api/game/${gameId}/messages`, { method: "POST", body: { text } });
+    poll();
+  }
+
+  async function castVote(targetId: string) {
+    if (!gameId) return;
+    setView((prev) => (prev ? { ...prev, myVote: targetId } : prev));
+    await api(`/api/game/${gameId}/vote`, { method: "POST", body: { targetId } });
+    poll();
+  }
+
+  if (stage === "boot") {
+    return <main className="flex flex-1 items-center justify-center text-sm text-zinc-500">불러오는 중...</main>;
+  }
+
+  if (stage === "lobby") {
     return (
       <main className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center gap-6 px-6 py-10">
         <h1 className="text-3xl font-semibold tracking-tight">Are You AI?</h1>
         <ul className="list-disc space-y-2 pl-5 text-zinc-600 dark:text-zinc-400">
-          <li>{PLAYER_COUNT}명 중 1명은 AI입니다. 모두 랜덤한 이름을 받습니다.</li>
+          <li>
+            게임 시작을 누른 플레이어 {HUMANS_PER_GAME}명이 모이면 방에 입장합니다. 방에는 AI가 1명 숨어
+            있어 총 {PLAYER_COUNT}명이 됩니다.
+          </li>
+          <li>모두 랜덤한 이름을 받습니다.</li>
           <li>{formatTime(CHAT_SECONDS)}간 대화한 뒤 {VOTE_SECONDS}초 동안 비밀투표합니다.</li>
           <li>최다 득표자가 사람이면 탈락, AI면 플레이어의 승리입니다.</li>
           <li>동률이면 투표가 무효가 되고 다시 대화합니다.</li>
           <li>최종 2인에 AI가 남으면 AI의 승리입니다.</li>
         </ul>
-        <p className="rounded-lg bg-zinc-100 p-3 text-sm text-zinc-600 dark:bg-zinc-900 dark:text-zinc-400">
-          프로토타입: 나를 제외한 {PLAYER_COUNT - 1}명은 미리 정해둔 대사를 말하는 봇입니다.
-        </p>
         <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={fast}
-            onChange={(e) => setFast(e.target.checked)}
-          />
-          빠른 테스트 (대화 {FAST_CHAT_SECONDS}초)
+          <input type="checkbox" checked={fast} onChange={(e) => setFast(e.target.checked)} />
+          빠른 테스트 (대화 {FAST_CHAT_SECONDS}초, 매칭된 두 명 모두 체크해야 적용)
         </label>
         <button
-          onClick={startGame}
+          onClick={startMatching}
           className="h-12 rounded-full bg-foreground font-medium text-background transition-opacity hover:opacity-90"
         >
           게임 시작
@@ -206,29 +182,53 @@ export default function GameRoom() {
     );
   }
 
-  const alive = aliveOf(participants);
+  if (stage === "queue") {
+    return (
+      <main className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-6 px-6">
+        <p className="animate-pulse text-lg font-medium">상대 플레이어를 찾는 중...</p>
+        <p className="text-center text-sm text-zinc-500">
+          다른 플레이어가 게임 시작을 누르면 자동으로 입장합니다.
+        </p>
+        <button
+          onClick={cancelMatching}
+          className="h-11 rounded-full border border-black/10 px-6 text-sm dark:border-white/20"
+        >
+          취소
+        </button>
+      </main>
+    );
+  }
+
+  if (!view) {
+    return <main className="flex flex-1 items-center justify-center text-sm text-zinc-500">입장 중...</main>;
+  }
+
+  const { me, phase, result, winner } = view;
+  const youAlive = !me.eliminated;
+  const nameOf = (id: string | null) => view.participants.find((p) => p.id === id)?.name ?? "";
+  const alive = view.participants.filter((p) => !p.eliminated);
 
   return (
     <main className="mx-auto flex h-dvh w-full max-w-2xl flex-col">
       <header className="border-b border-black/10 px-4 py-3 dark:border-white/15">
         <div className="flex items-center justify-between text-sm">
           <span className="font-medium">
-            {round}라운드 ·{" "}
+            {view.round}라운드 ·{" "}
             {phase === "chat" && "대화"}
             {phase === "vote" && "투표"}
             {phase === "result" && "결과"}
             {phase === "over" && "게임 종료"}
           </span>
-          {(phase === "chat" || phase === "vote") && (
+          {phase !== "over" && (
             <span className="font-mono text-base tabular-nums">{formatTime(secondsLeft)}</span>
           )}
         </div>
         <p className="mt-1 text-xs text-zinc-500">
-          당신의 이름: <b>{you?.name}</b>
+          당신의 이름: <b>{me.name}</b>
           {!youAlive && " (탈락)"}
         </p>
         <div className="mt-2 flex flex-wrap gap-2">
-          {participants.map((p) => (
+          {view.participants.map((p) => (
             <span
               key={p.id}
               className={`rounded-full border px-3 py-1 text-xs ${
@@ -239,7 +239,7 @@ export default function GameRoom() {
             >
               {p.name}
               {p.isYou && " (나)"}
-              {phase === "over" && p.isAI && " 🤖"}
+              {p.isAI && " 🤖"}
             </span>
           ))}
         </div>
@@ -254,12 +254,12 @@ export default function GameRoom() {
           ) : (
             <div
               key={m.id}
-              className={`flex flex-col ${m.speakerId === you?.id ? "items-end" : "items-start"}`}
+              className={`flex flex-col ${m.speakerId === me.id ? "items-end" : "items-start"}`}
             >
               <span className="text-xs text-zinc-500">{nameOf(m.speakerId)}</span>
               <p
                 className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm ${
-                  m.speakerId === you?.id
+                  m.speakerId === me.id
                     ? "bg-foreground text-background"
                     : "bg-zinc-100 dark:bg-zinc-800"
                 }`}
@@ -306,9 +306,9 @@ export default function GameRoom() {
                   .map((p) => (
                     <button
                       key={p.id}
-                      onClick={() => setMyVote(p.id)}
+                      onClick={() => castVote(p.id)}
                       className={`h-11 rounded-full border px-5 text-sm ${
-                        myVote === p.id
+                        view.myVote === p.id
                           ? "border-foreground bg-foreground text-background"
                           : "border-black/10 dark:border-white/20"
                       }`}
@@ -339,16 +339,15 @@ export default function GameRoom() {
             <p className="text-center text-sm font-medium">
               {result.outcome.kind === "tie" && "동률입니다. 투표가 무효되고 다시 대화를 시작합니다."}
               {result.outcome.kind === "eliminated" &&
-                `${nameOf(result.outcome.targetId)}님은 사람이었습니다. 탈락!`}
+                (result.outcome.targetId === me.id
+                  ? "당신이 지목되어 탈락했습니다."
+                  : `${nameOf(result.outcome.targetId)}님은 사람이었습니다. 탈락!`)}
               {result.outcome.kind === "ai-caught" &&
                 `${nameOf(result.outcome.targetId)}님이 AI였습니다!`}
             </p>
-            <button
-              onClick={continueGame}
-              className="h-11 w-full rounded-full bg-foreground text-sm font-medium text-background"
-            >
-              {winner ? "결과 보기" : "다음 라운드"}
-            </button>
+            <p className="text-center text-xs text-zinc-500">
+              {winner ? "곧 최종 결과가 표시됩니다." : "곧 다음 라운드가 시작됩니다."}
+            </p>
           </div>
         )}
 
@@ -358,11 +357,11 @@ export default function GameRoom() {
               {winner === "players" ? "플레이어 승리! AI를 찾아냈습니다." : "AI 승리! 끝까지 들키지 않았습니다."}
             </p>
             <p className="text-sm text-zinc-500">
-              AI는 {participants.find((p) => p.isAI)?.name}님이었습니다.
+              AI는 {view.participants.find((p) => p.isAI)?.name}님이었습니다.
             </p>
             <div className="flex gap-2">
               <button
-                onClick={() => setPhase("lobby")}
+                onClick={() => setStage("lobby")}
                 className="h-11 flex-1 rounded-full bg-foreground text-sm font-medium text-background"
               >
                 다시 하기
